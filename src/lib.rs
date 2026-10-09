@@ -52,12 +52,25 @@
 use core::borrow::{Borrow, BorrowMut};
 use core::cmp::Ordering;
 use core::fmt;
+use core::hash::{Hash, Hasher};
 use core::ops::{Deref, DerefMut};
 
 /// Trait for types that perform an arbitrary ordering.
 ///
-/// More specifically, this trait is for types that perform either a partial or
-/// total order but semantically it is nonsensical.
+/// More specifically, this trait is for types that can be given a total order
+/// but for which that order is semantically nonsensical.
+///
+/// # Requirements
+///
+/// [`Ordered`] implements `PartialEq`, `Eq`, `PartialOrd` and `Ord` entirely in terms of
+/// `arbitrary_cmp`, so `arbitrary_cmp` must be a total order: reflexive, antisymmetric, transitive
+/// and total.
+/// If `T: Hash` then any two values for which `arbitrary_cmp` returns `Ordering::Equal` must also
+/// hash equally. Violating either requirement is not undefined behaviour, but collections such as
+/// `BTreeMap` and `HashMap` will behave incorrectly.
+///
+/// `arbitrary_cmp` does not have to agree with `T`'s own `PartialEq`, and `Ordered` never calls
+/// it.
 ///
 /// # Examples
 ///
@@ -82,12 +95,28 @@ use core::ops::{Deref, DerefMut};
 ///     }
 /// }
 /// ```
-pub trait ArbitraryOrd<Rhs = Self>: PartialEq<Rhs> {
+pub trait ArbitraryOrd<Rhs = Self> {
     /// Implements a meaningless, arbitrary ordering.
     fn arbitrary_cmp(&self, other: &Rhs) -> Ordering;
 }
 
-/// A wrapper type that implements `PartialOrd` and `Ord`.
+/// A wrapper type that implements `PartialEq`, `Eq`, `PartialOrd` and `Ord` using
+/// [`ArbitraryOrd::arbitrary_cmp`].
+///
+/// `Hash` hashes the inner `T`. The `Borrow<T>` impl lets a map keyed by `Ordered<T>` be queried
+/// with a `&T`, but such a lookup compares and hashes with `T`'s own `Ord`, `Eq` and `Hash`, not
+/// `arbitrary_cmp`. It does not compile when `T` lacks those traits, as with `f64` in a
+/// `BTreeMap`, and it only finds the right entry when they agree with `arbitrary_cmp`. Query with
+/// [`Ordered::from_ref`] instead.
+///
+/// Because equality comes from `arbitrary_cmp`, `Ordered<T>` does not implement `PartialEq`
+/// unless `T: ArbitraryOrd`:
+///
+/// ```compile_fail,E0369
+/// use ordered::Ordered;
+///
+/// let _ = Ordered(String::new()) == Ordered(String::new());
+/// ```
 ///
 /// # Examples
 ///
@@ -118,7 +147,7 @@ pub trait ArbitraryOrd<Rhs = Self>: PartialEq<Rhs> {
 /// assert_eq!(*ordered, point); // Use `ops::Deref`.
 /// assert_eq!(&ordered.0, ordered.as_ref()); // Use the public inner field or `AsRef`.
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone)]
 #[repr(transparent)]
 pub struct Ordered<T>(pub T);
 
@@ -153,12 +182,22 @@ impl<T: ArbitraryOrd> ArbitraryOrd for &T {
     fn arbitrary_cmp(&self, other: &Self) -> Ordering { (*self).arbitrary_cmp(other) }
 }
 
-impl<T: ArbitraryOrd> PartialOrd for Ordered<T> {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> { Some((*self).arbitrary_cmp(other)) }
+impl<T: ArbitraryOrd> PartialEq for Ordered<T> {
+    fn eq(&self, other: &Self) -> bool { self.0.arbitrary_cmp(&other.0) == Ordering::Equal }
 }
 
-impl<T: ArbitraryOrd + Eq> Ord for Ordered<T> {
-    fn cmp(&self, other: &Self) -> Ordering { (*self).arbitrary_cmp(other) }
+impl<T: ArbitraryOrd> Eq for Ordered<T> {}
+
+impl<T: ArbitraryOrd> PartialOrd for Ordered<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> { Some(self.cmp(other)) }
+}
+
+impl<T: ArbitraryOrd> Ord for Ordered<T> {
+    fn cmp(&self, other: &Self) -> Ordering { self.0.arbitrary_cmp(&other.0) }
+}
+
+impl<T: Hash> Hash for Ordered<T> {
+    fn hash<H: Hasher>(&self, state: &mut H) { self.0.hash(state) }
 }
 
 impl<T: fmt::Display> fmt::Display for Ordered<T> {
