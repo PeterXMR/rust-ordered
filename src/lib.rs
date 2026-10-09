@@ -70,7 +70,7 @@ use core::ops::{Deref, DerefMut};
 /// `BTreeMap` and `HashMap` will behave incorrectly.
 ///
 /// `arbitrary_cmp` does not have to agree with `T`'s own `PartialEq`, and `Ordered` never calls
-/// it.
+/// it. For example `f64::NAN != f64::NAN`, but `Ordered(f64::NAN) == Ordered(f64::NAN)`.
 ///
 /// # Examples
 ///
@@ -181,6 +181,37 @@ impl<T> Ordered<T> {
 impl<T: ArbitraryOrd> ArbitraryOrd for &T {
     fn arbitrary_cmp(&self, other: &Self) -> Ordering { (*self).arbitrary_cmp(other) }
 }
+
+macro_rules! impl_arbitrary_ord_for_float {
+    ($($t:ty),*) => {
+        $(
+            #[doc = concat!(
+                "Orders `", stringify!($t), "` values numerically, treats `-0.0` and `0.0` as ",
+                "equal, treats all `NaN`s as equal regardless of sign or payload, and orders ",
+                "`NaN` above every other value.\n\n",
+                "This differs from `", stringify!($t), "::total_cmp`, which distinguishes `-0.0` ",
+                "from `0.0` and orders `NaN`s by sign and payload.\n\n",
+                "# Examples\n\n",
+                "```\n",
+                "use std::collections::BTreeMap;\n",
+                "use ordered::Ordered;\n\n",
+                "let mut map = BTreeMap::new();\n",
+                "map.insert(Ordered(1.5_", stringify!($t), "), \"finite\");\n",
+                "map.insert(Ordered(", stringify!($t), "::NAN), \"nan\");\n\n",
+                "assert_eq!(map.get(Ordered::from_ref(&", stringify!($t), "::NAN)), ",
+                "Some(&\"nan\"));\n",
+                "```"
+            )]
+            impl ArbitraryOrd for $t {
+                fn arbitrary_cmp(&self, other: &Self) -> Ordering {
+                    self.partial_cmp(other)
+                        .unwrap_or_else(|| self.is_nan().cmp(&other.is_nan()))
+                }
+            }
+        )*
+    };
+}
+impl_arbitrary_ord_for_float!(f32, f64);
 
 impl<T: ArbitraryOrd> PartialEq for Ordered<T> {
     fn eq(&self, other: &Self) -> bool { self.0.arbitrary_cmp(&other.0) == Ordering::Equal }
@@ -311,5 +342,97 @@ mod tests {
             p: Box<dyn ArbitraryOrd<Self>>,
             q: Box<dyn PartialOrd<Self>>, // Sanity check.
         }
+    }
+
+    #[test]
+    fn f64_sorts_across_every_category_as_a_total_order() {
+        extern crate std;
+        use std::vec::Vec;
+
+        let payload_nan = f64::from_bits(0x7ff8_0000_0000_0001);
+        let negative_signalling_nan = f64::from_bits(0xfff0_0000_0000_0001);
+        assert!(payload_nan.is_nan() && negative_signalling_nan.is_nan());
+        assert_ne!(payload_nan.to_bits(), f64::NAN.to_bits());
+
+        let mut values: Vec<Ordered<f64>> = [
+            f64::NAN,
+            f64::INFINITY,
+            -0.0,
+            payload_nan,
+            0.0,
+            -f64::NAN,
+            f64::MAX,
+            negative_signalling_nan,
+            f64::NEG_INFINITY,
+            -1.0,
+            1.0,
+        ]
+        .into_iter()
+        .map(Ordered)
+        .collect();
+        values.sort();
+
+        let (non_nan, nans) = values.split_at(7);
+        let expected = [f64::NEG_INFINITY, -1.0, 0.0, 0.0, 1.0, f64::MAX, f64::INFINITY];
+        for (actual, expected) in non_nan.iter().zip(expected) {
+            assert_eq!(*actual, Ordered(expected));
+        }
+        assert_eq!(nans.len(), 4);
+        for a in nans {
+            for b in nans {
+                assert_eq!(a.cmp(b), Ordering::Equal);
+            }
+        }
+
+        for a in &values {
+            for b in &values {
+                assert_eq!(a.cmp(b), b.cmp(a).reverse());
+                assert_eq!(a.partial_cmp(b), Some(a.cmp(b)));
+                assert_eq!(a == b, a.cmp(b) == Ordering::Equal);
+                for c in &values {
+                    if a <= b && b <= c {
+                        assert!(a <= c);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn f32_orders_like_f64() {
+        let payload_nan = f32::from_bits(0x7fc0_0001);
+        assert!(payload_nan.is_nan());
+
+        assert!(Ordered(1.0_f32) < Ordered(2.0_f32));
+        assert!(Ordered(-0.0_f32) == Ordered(0.0_f32));
+        assert!(Ordered(f32::INFINITY) < Ordered(f32::NAN));
+        assert!(Ordered(f32::NEG_INFINITY) < Ordered(f32::NAN));
+        assert!(Ordered(f32::NAN) == Ordered(-f32::NAN));
+        assert!(Ordered(f32::NAN) == Ordered(payload_nan));
+    }
+
+    #[test]
+    fn ordered_float_reference_uses_float_ordering() {
+        let (one, two, nan) = (1.0_f64, 2.0_f64, f64::NAN);
+
+        assert!(Ordered(&one) < Ordered(&two));
+        assert!(Ordered(&two) < Ordered(&nan));
+        assert!(Ordered(&nan) == Ordered(&nan));
+    }
+
+    #[test]
+    fn btree_map_collapses_equal_floats_into_one_key() {
+        extern crate std;
+        use std::collections::BTreeMap;
+
+        let mut map = BTreeMap::new();
+        map.insert(Ordered(0.0_f64), "positive zero");
+        map.insert(Ordered(-0.0_f64), "negative zero");
+        map.insert(Ordered(f64::NAN), "nan");
+        map.insert(Ordered(-f64::NAN), "negative nan");
+
+        assert_eq!(map.len(), 2);
+        assert_eq!(map.get(Ordered::from_ref(&0.0_f64)), Some(&"negative zero"));
+        assert_eq!(map.get(Ordered::from_ref(&f64::NAN)), Some(&"negative nan"));
     }
 }

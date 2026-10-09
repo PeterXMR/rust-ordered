@@ -72,6 +72,25 @@ println!("Or use deref coercion: {}", adt.p);
 println!("Or we can use borrow: {}", &adt.p);
 ```
 
+### Floats
+
+`f32` and `f64` implement `ArbitraryOrd`, so `Ordered<f64>` implements `Eq` and `Ord` and can be
+used as a `BTreeMap` key. Finite values and infinities are ordered numerically, `-0.0` and `0.0`
+are equal, and `NaN` is greater than every other value. All `NaN`s are equal to each other,
+regardless of sign or payload, so `Ordered(f64::NAN) == Ordered(f64::NAN)` even though
+`f64::NAN != f64::NAN`.
+
+```rust
+use std::collections::BTreeMap;
+use ordered::Ordered;
+
+let mut map = BTreeMap::new();
+map.insert(Ordered(1.5_f64), "finite");
+map.insert(Ordered(f64::NAN), "nan");
+
+assert_eq!(map.get(Ordered::from_ref(&f64::NAN)), Some(&"nan"));
+```
+
 ## Minimum Supported Rust Version (MSRV)
 
 This library should compile with any combination of features on **Rust 1.63.0**.
